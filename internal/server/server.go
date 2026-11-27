@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -33,7 +34,33 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	return mux
+	return logRequests(mux)
+}
+
+// logRequests gives visibility into what clients are actually doing, since
+// this server otherwise has no access logging at all.
+func logRequests(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rw := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rw, r)
+
+		keyPreview := safeKeyPreview(r.Header.Get("X-API-Token"))
+		log.Printf(
+			"%s %s ip=%s key=%s... status=%d if-match=%q if-none-match=%q",
+			r.Method, r.URL.Path, clientIP(r), keyPreview, rw.status,
+			r.Header.Get("If-Match"), r.Header.Get("If-None-Match"),
+		)
+	})
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(status int) {
+	r.status = status
+	r.ResponseWriter.WriteHeader(status)
 }
 
 // rateLimited applies a simple per-IP token bucket before auth, so a bad
@@ -49,6 +76,13 @@ func (s *Server) rateLimited(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r)
 	}
+}
+
+func safeKeyPreview(key string) string {
+	if len(key) < 8 {
+		return "-"
+	}
+	return key[:8]
 }
 
 func clientIP(r *http.Request) string {
@@ -67,6 +101,9 @@ func (s *Server) authenticate(r *http.Request) (string, bool, error) {
 	valid, err := s.st.ValidKey(key)
 	if err != nil {
 		return "", false, err
+	}
+	if !valid {
+		log.Printf("DEBUG auth reject: len=%d key=%q", len(key), key)
 	}
 	return key, valid, nil
 }
@@ -101,6 +138,10 @@ func (s *Server) handleGetContent(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("ETag", etag)
 	w.Header().Set("Content-Type", "application/octet-stream")
+	// Set Content-Length explicitly (instead of letting net/http fall back to
+	// chunked encoding) so a connection that drops mid-download fails loudly
+	// on the client instead of silently decoding a truncated body.
+	w.Header().Set("Content-Length", strconv.Itoa(len(blob)))
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(blob)
 }
@@ -132,6 +173,12 @@ func (s *Server) handlePutContent(w http.ResponseWriter, r *http.Request) {
 	newEtag, err := s.st.PutBlob(key, blob, ifMatch)
 	if errors.Is(err, store.ErrConflict) {
 		w.WriteHeader(http.StatusPreconditionFailed)
+		return
+	}
+	if errors.Is(err, store.ErrShrinkGuard) {
+		log.Printf("shrink guard rejected write: key=%s... new_size=%d", safeKeyPreview(key), len(blob))
+		http.Error(w, "rejected: new data is suspiciously smaller than what's currently stored; "+
+			"refusing to avoid data loss", http.StatusConflict)
 		return
 	}
 	if err != nil {

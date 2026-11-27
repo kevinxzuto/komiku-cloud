@@ -7,6 +7,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
+	"time"
 
 	"komiku-cloud/internal/server"
 	"komiku-cloud/internal/store"
@@ -15,13 +17,32 @@ import (
 func main() {
 	dbPath := envOr("DB_PATH", "/data/komiku-cloud.db")
 
-	if len(os.Args) > 1 && os.Args[1] == "keygen" {
-		label := ""
-		if len(os.Args) > 2 {
-			label = os.Args[2]
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "keygen":
+			label := ""
+			if len(os.Args) > 2 {
+				label = os.Args[2]
+			}
+			runKeygen(dbPath, label)
+			return
+		case "history":
+			if len(os.Args) < 3 {
+				log.Fatal("usage: komiku-cloud history <api-key>")
+			}
+			runHistory(dbPath, os.Args[2])
+			return
+		case "restore":
+			if len(os.Args) < 4 {
+				log.Fatal("usage: komiku-cloud restore <api-key> <history-id>")
+			}
+			id, err := strconv.ParseInt(os.Args[3], 10, 64)
+			if err != nil {
+				log.Fatalf("invalid history id: %v", err)
+			}
+			runRestore(dbPath, os.Args[2], id)
+			return
 		}
-		runKeygen(dbPath, label)
-		return
 	}
 
 	runServe(dbPath)
@@ -60,6 +81,41 @@ func runKeygen(dbPath, label string) {
 	}
 
 	fmt.Println(key)
+}
+
+func runHistory(dbPath, apiKey string) {
+	st, err := store.Open(dbPath)
+	if err != nil {
+		log.Fatalf("failed to open store: %v", err)
+	}
+	defer st.Close()
+
+	entries, err := st.ListHistory(apiKey)
+	if err != nil {
+		log.Fatalf("failed to list history: %v", err)
+	}
+	if len(entries) == 0 {
+		fmt.Println("no history entries for this key")
+		return
+	}
+	for _, e := range entries {
+		t := time.Unix(e.SavedAt, 0).Format(time.RFC3339)
+		fmt.Printf("id=%d  saved_at=%s  size=%d bytes\n", e.ID, t, e.Size)
+	}
+}
+
+func runRestore(dbPath, apiKey string, historyID int64) {
+	st, err := store.Open(dbPath)
+	if err != nil {
+		log.Fatalf("failed to open store: %v", err)
+	}
+	defer st.Close()
+
+	newEtag, err := st.RestoreHistory(apiKey, historyID)
+	if err != nil {
+		log.Fatalf("failed to restore: %v", err)
+	}
+	fmt.Printf("restored history id=%d, new etag=%s\n", historyID, newEtag)
 }
 
 func generateKey() (string, error) {

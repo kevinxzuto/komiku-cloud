@@ -1,5 +1,9 @@
 # komiku-cloud
 
+<p align="center">
+  <img src=".github/readme-images/logo.png" width="180" alt="komiku-cloud logo">
+</p>
+
 Self-hosted sync server for [Komikku](https://github.com/komikku-app/komikku), implementing its
 built-in `SyncYomi` protocol so your reading progress, library, history, and settings sync
 between your own devices — no Google account, no third party.
